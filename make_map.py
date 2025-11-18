@@ -167,13 +167,16 @@ def convert_image(
         r, g, b = transparent_colour
         # Split into RGB channels
         r_band, g_band, b_band, _ = src.split()
-        # Create binary masks for each channel: 255 where the channel value
-        # matches the transparent component, otherwise 0
-        mask_r = r_band.point(lambda v: 255 if v == r else 0)
-        mask_g = g_band.point(lambda v: 255 if v == g else 0)
-        mask_b = b_band.point(lambda v: 255 if v == b else 0)
+        # Create binary masks for each channel: 1 where the channel value
+        # matches the transparent component, otherwise 0. Use mode "1" to
+        # satisfy ImageChops.logical_and requirements.
+        mask_r = r_band.point(lambda v: 255 if v == r else 0).convert("1")
+        mask_g = g_band.point(lambda v: 255 if v == g else 0).convert("1")
+        mask_b = b_band.point(lambda v: 255 if v == b else 0).convert("1")
         # A pixel is transparent only if all three channels match
-        trans_mask = ImageChops.logical_and(mask_r, ImageChops.logical_and(mask_g, mask_b))
+        trans_mask_1bit = ImageChops.logical_and(mask_r, ImageChops.logical_and(mask_g, mask_b))
+        # Convert to "L" so we can paste as an alpha mask (0 transparent, 255 opaque)
+        trans_mask = trans_mask_1bit.convert("L")
         # Build an alpha layer: start opaque and paste zeros where the mask is 255
         alpha = Image.new("L", src.size, color=255)
         alpha.paste(0, mask=trans_mask)
