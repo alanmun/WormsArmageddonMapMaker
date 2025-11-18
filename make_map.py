@@ -52,7 +52,7 @@ import os
 import struct
 from typing import Iterable, Optional, Tuple
 
-from PIL import Image, ImageChops  # type: ignore
+from PIL import Image, ImageChops, ImageCms  # type: ignore
 
 
 def find_custom_chunk(data: bytes, names: Iterable[str]) -> Optional[bytes]:
@@ -153,7 +153,21 @@ def convert_image(
         raise ValueError("max_colours must be between 1 and 112")
 
     # Load and normalise the image
-    src = Image.open(input_path).convert("RGBA")
+    src = Image.open(input_path)
+    # If the source embeds an ICC profile, convert to sRGB to preserve vivid colours
+    icc_bytes = src.info.get("icc_profile")
+    if icc_bytes:
+        try:
+            src = ImageCms.profileToProfile(
+                src,
+                ImageCms.ImageCmsProfile(io.BytesIO(icc_bytes)),
+                ImageCms.createProfile("sRGB"),
+                outputMode=src.mode,
+            )
+        except Exception:
+            # Fall back silently if profile conversion fails
+            pass
+    src = src.convert("RGBA")
     # Resize so that width and height are multiples of eight
     new_size = ensure_divisible_by_8(src.size)
     if new_size != src.size:
@@ -183,27 +197,31 @@ def convert_image(
         src.putalpha(alpha)
 
     # Quantise to an 8‑bit palette
-    # Use median cut to minimise perceptual error; quantize returns a 'P' mode image
+    # Use MAXCOVERAGE with a small k‑means refinement to better preserve small, saturated accents
     quantized = src.convert("RGB").quantize(
-        colors=max_colours, method=Image.MEDIANCUT, dither=Image.FLOYDSTEINBERG if dither else Image.NONE
+        colors=max_colours,
+        method=Image.MAXCOVERAGE,
+        kmeans=2,
+        dither=Image.FLOYDSTEINBERG if dither else Image.NONE,
     )
 
     # If we used transparency, we need to add a transparent palette entry and
-    # set up the tRNS chunk accordingly.  Pillow can do this if we pass the
-    # transparency index when saving.  To avoid losing colours, we add one
-    # extra colour at the end of the palette.
+    # set up the tRNS chunk accordingly.  Choose an unused palette index so we
+    # don't replace an existing colour used by the image.
     transparency_index: Optional[int] = None
     if transparent_colour is not None:
-        # Append the transparent colour to the palette
+        used = {v for _, v in (quantized.getcolors(maxcolors=1_000_000) or [])}
+        available_index = next((i for i in range(256) if i not in used), None)
+        if available_index is None:
+            # Extremely unlikely with <=112 colours, but fall back to the last index
+            available_index = 255
         palette = quantized.getpalette()  # list of ints
-        # Ensure palette has room for extra colour
-        if len(palette) // 3 < 256:
-            palette += list(transparent_colour)  # add RGB
-            quantized.putpalette(palette)
-            transparency_index = (len(palette) // 3) - 1
-        else:
-            # Palette full; use index 0 for transparency and shift colours down
-            transparency_index = 0
+        # Ensure palette has exactly 256 entries (768 ints)
+        if len(palette) < 256 * 3:
+            palette += [0] * (256 * 3 - len(palette))
+        palette[available_index * 3 : available_index * 3 + 3] = list(transparent_colour)
+        quantized.putpalette(palette)
+        transparency_index = available_index
 
     # Save to a bytes buffer so we can insert our custom chunk
     buffer = io.BytesIO()
