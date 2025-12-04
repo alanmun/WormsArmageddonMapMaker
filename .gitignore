@@ -10,5 +10,6 @@ wheels/
 .venv
 .aider*
 
-#.png
+# Media
 *.png
+*.webp
